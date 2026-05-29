@@ -16,8 +16,8 @@ name: Auto Complete Day
 
 on:
   schedule:
-    - cron: '0 20 * * 1-5'  # 22:00 Madrid (CEST, summer)
-    - cron: '0 21 * * 1-5'  # 22:00 Madrid (CET, winter)
+    - cron: '0 18 * * 1-5'  # 22:00 Madrid (CEST, summer)
+    - cron: '0 19 * * 1-5'  # 22:00 Madrid (CET, winter)
   workflow_dispatch:
     inputs:
       dry-run:
