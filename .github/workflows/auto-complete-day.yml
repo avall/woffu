@@ -1,10 +1,18 @@
 name: Auto Complete Day
 
-# Fills today's presence slots in Woffu via API every weekday at 22:00 Europe/Madrid
+# Fills and confirms today's presence slots in Woffu via API every weekday,
+# in the evening Europe/Madrid time.
 #
-# GitHub cron has no timezone support, so we schedule both UTC offsets that
-# resolve to 22:00 Madrid (CEST/CET) and add a runtime guard that only proceeds
-# when the Madrid local hour is exactly 22.
+# GitHub cron has no timezone support, so a single 19:00 UTC tick lands at 21:00
+# Madrid in summer (CEST) and 20:00 in winter (CET). Running early in the evening
+# is deliberate: GitHub queues scheduled runs and routinely starts them 5-30 min
+# late, and this leaves 3-4h of slack before midnight. If a run ever drifted past
+# midnight the script would compute the *next* day and fill a day that has not
+# happened yet.
+#
+# The guard is that backstop: it is a lower bound (>= 20:00 Madrid), so ordinary
+# queue delays still pass, but a run that slipped into the small hours does not.
+# An equality check would silently drop whole days whenever GitHub ran on time.
 #
 # Uses the same secrets as `sign.yml`:
 #   WOFFU_URL          Main Woffu URL (e.g. https://app.woffu.com)
@@ -16,8 +24,7 @@ name: Auto Complete Day
 
 on:
   schedule:
-    - cron: '0 18 * * 1-5'  # 22:00 Madrid (CEST, summer)
-    - cron: '0 19 * * 1-5'  # 22:00 Madrid (CET, winter)
+    - cron: '0 19 * * 1-5'  # 21:00 Madrid (CEST) / 20:00 Madrid (CET)
   workflow_dispatch:
     inputs:
       dry-run:
@@ -49,8 +56,8 @@ jobs:
         id: guard
         run: |
           MADRID_HOUR=$(TZ=Europe/Madrid date '+%H')
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$MADRID_HOUR" != "22" ]; then
-            echo "Madrid hour=$MADRID_HOUR (not 22). Skipping this cron tick."
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$MADRID_HOUR" -lt 20 ]; then
+            echo "Madrid hour=$MADRID_HOUR (before 20). Skipping this cron tick."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
