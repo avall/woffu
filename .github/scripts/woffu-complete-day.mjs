@@ -23,7 +23,12 @@
  *
  * Flags:
  *   --dry-run   Authenticate and compute slots, but don't PUT to the API.
+ *
+ * After filling the slots the day is also confirmed (the "Confirmar" action in
+ * the Woffu UI), so no manual step is left.
  */
+
+import { pathToFileURL } from "node:url";
 
 const WOFFU_URL = (process.env.WOFFU_URL || "").replace(/\/+$/, "");
 const COMPANY_URL = (process.env.WOFFU_COMPANY_URL || "").replace(/\/+$/, "");
@@ -31,15 +36,17 @@ const EMAIL = process.env.WOFFU_EMAIL || "";
 const PASSWORD = process.env.WOFFU_PASSWORD || "";
 const DRY_RUN = process.argv.includes("--dry-run");
 
-for (const [name, value] of [
-  ["WOFFU_URL", WOFFU_URL],
-  ["WOFFU_COMPANY_URL", COMPANY_URL],
-  ["WOFFU_EMAIL", EMAIL],
-  ["WOFFU_PASSWORD", PASSWORD],
-]) {
-  if (!value) {
-    console.error(`ERROR: ${name} must be set`);
-    process.exit(1);
+function requireEnv() {
+  for (const [name, value] of [
+    ["WOFFU_URL", WOFFU_URL],
+    ["WOFFU_COMPANY_URL", COMPANY_URL],
+    ["WOFFU_EMAIL", EMAIL],
+    ["WOFFU_PASSWORD", PASSWORD],
+  ]) {
+    if (!value) {
+      console.error(`ERROR: ${name} must be set`);
+      process.exit(1);
+    }
   }
 }
 
@@ -220,6 +227,12 @@ async function diarySummary(token, userId, date) {
   return diaries.find((d) => (d?.date ?? d?.Date ?? "").startsWith(date)) || null;
 }
 
+/** Extracts the diary summary id from a diary entry, or null if absent. */
+function diarySummaryId(diary) {
+  const n = parseInt(diary?.diarySummaryId, 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 /** Returns the first numeric value inside a Woffu `*Formatted` block (hours). */
 function formattedHours(block) {
   const v = block?.values?.[0];
@@ -250,16 +263,33 @@ function isWorkingDay(today) {
 }
 
 /**
+ * Returns a reason string if the day is already closed for writing, else null.
+ *
+ * `accepted === true` marks a day the user already confirmed. Woffu then flips
+ * `isUserEditable` to false, so both the slots PUT and a second confirm would be
+ * rejected (or silently overwrite a confirmed day). Note that a confirmed day
+ * can still report 0 worked hours and `in`/`out` equal to the schedule
+ * placeholders, so this check cannot be folded into `existingWorkReason`.
+ */
+function closedReason(today) {
+  if (!today) return null;
+  if (today.accepted === true) return "day already confirmed (accepted=true)";
+  if (today.isUserEditable === false) return "day is not user-editable";
+  return null;
+}
+
+/**
  * Returns a reason string if the day already has work or pending slots, else null.
  *
  * Woffu diary semantics:
  *   - `workedTimeFormatted` > 0 means actual signs counted as worked time.
  *   - `presenceEvents` / `pendingPresenceEvents` carry real or pending sign data.
- *   - On a fully empty day `in`/`out` mirror the schedule placeholders
+ *   - On an untouched day `in`/`out` mirror the schedule placeholders
  *     `maxStartTime` / `minEndTime`. After a `slots/self` PUT they reflect the
  *     first slot's in and the last slot's out, so a divergence from the
- *     schedule defaults is a reliable signal that the day was already filled
- *     (whether by a previous workflow run or manually).
+ *     schedule defaults signals the day was already filled. This is a heuristic,
+ *     not a guarantee: a day whose slots happen to match the placeholders exactly
+ *     looks untouched here, which is why `closedReason` is checked as well.
  */
 function existingWorkReason(today) {
   if (!today) return null;
@@ -380,9 +410,25 @@ async function completeDay(token, userId, date, slots) {
   }
 }
 
+/** Confirms the day (equivalent to the "Confirmar" button in the Woffu UI). */
+async function confirmDay(token, summaryId) {
+  const url = `${COMPANY_URL}/api/svc/core/diariesquery/users/diarysummaries/confirm`;
+  const res = await fetch(url, {
+    method: "PUT",
+    headers: bearerHeaders(token),
+    body: JSON.stringify({ diarySummaryIds: [summaryId] }),
+  });
+  if (!res.ok) {
+    throw new Error(`confirm failed: HTTP ${res.status} ${await res.text()}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
+async function main() {
+requireEnv();
 
 const { date, dow } = getTodayMadrid();
 console.log(`Date (Madrid): ${date}  dow=${dow}  dry_run=${DRY_RUN}`);
@@ -403,6 +449,12 @@ if (!status.working) {
   process.exit(0);
 }
 console.log(`Working day confirmed (expected=${status.expectedHours}h).`);
+
+const closed = closedReason(today);
+if (closed) {
+  console.log(`Day is closed (${closed}) — skipping.`);
+  process.exit(0);
+}
 
 const existing = existingWorkReason(today);
 if (existing) {
@@ -426,5 +478,25 @@ if (DRY_RUN) {
   process.exit(0);
 }
 
+// Resolved before the PUT: Woffu pre-creates a diary summary per calendar day,
+// so the id is already known and does not change when the slots are written.
+const summaryId = diarySummaryId(today);
+if (summaryId === null) {
+  console.error(`ERROR: no diarySummaryId on the diary for ${date} — aborting.`);
+  process.exit(1);
+}
+
 await completeDay(token, userId, date, slots);
-console.log("Done — day completed in Woffu.");
+console.log("Slots saved in Woffu.");
+
+await confirmDay(token, summaryId);
+console.log(`Done — day completed and confirmed (diarySummaryId=${summaryId}).`);
+}
+
+// Only run when executed directly, so the pure helpers above can be imported
+// by tests without triggering the real API calls.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
+}
+
+export { diarySummaryId, closedReason, existingWorkReason, isWorkingDay };
