@@ -473,17 +473,20 @@ console.log("Generated slots:");
 for (const s of slots) console.log(`  ${s.in_time}  →  ${s.out_time}`);
 console.log(`Total: ${Math.floor(totalMin / 60)}h ${pad2(totalMin % 60)}m`);
 
-if (DRY_RUN) {
-  console.log("DRY RUN — payload not sent.");
-  process.exit(0);
-}
-
 // Resolved before the PUT: Woffu pre-creates a diary summary per calendar day,
 // so the id is already known and does not change when the slots are written.
+// Resolving it ahead of the dry-run exit means a dry run also proves the id can
+// be read from the live API, not just that the slots were computed.
 const summaryId = diarySummaryId(today);
 if (summaryId === null) {
   console.error(`ERROR: no diarySummaryId on the diary for ${date} — aborting.`);
   process.exit(1);
+}
+console.log(`Resolved diarySummaryId=${summaryId} (used to confirm the day).`);
+
+if (DRY_RUN) {
+  console.log("DRY RUN — slots not sent, day not confirmed.");
+  process.exit(0);
 }
 
 await completeDay(token, userId, date, slots);
